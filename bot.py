@@ -2,7 +2,9 @@ import csv
 import logging
 import os
 import random
+from threading import Thread
 import docx
+from flask import Flask
 import openpyxl
 from telegram import Update
 from telegram.ext import (
@@ -17,6 +19,22 @@ import xlrd
 BOT_TOKEN = "8885503132:AAFyCJmyo0oLDLNiK0agg0URqc1rDuG7DHQ"
 
 logging.basicConfig(level=logging.INFO)
+
+# --- RENDER UCHUN VEB-SERVER (PORT XATOSINI YO'QOTISH UCHUN) ---
+web_app = Flask("")
+
+
+@web_app.route("/")
+def home():
+    return "Bot 24/7 ishlamoqda!"
+
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host="0.0.0.0", port=port)
+
+
+# -------------------------------------------------------------
 
 
 def read_file_data(file_path):
@@ -75,7 +93,7 @@ def read_file_data(file_path):
 
 def convert_data(rows):
     quizmaker_text = ""
-    assyst_text = ""  # O'zgaruvchi to'g'ri e'lon qilindi
+    assyst_text = ""
     valid_q_num = 1
 
     for row in rows:
@@ -91,7 +109,6 @@ def convert_data(rows):
         if not question or not correct_ans:
             continue
 
-        # 1. QuizMaker format
         all_options = [correct_ans] + wrong_answers
         random.shuffle(all_options)
         correct_option_number = all_options.index(correct_ans) + 1
@@ -103,7 +120,6 @@ def convert_data(rows):
             quizmaker_text += f"{label}. {opt}\n"
         quizmaker_text += f"{correct_option_number}\n\n"
 
-        # 2. Assyst format
         assyst_text += f"? {question}\n"
         assyst_text += f"+ {correct_ans}\n"
         for w_ans in wrong_answers:
@@ -181,6 +197,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == "__main__":
+    # Veb serverni fonda ishga tushirish (Render talabi bo'yicha)
+    Thread(target=run_web).start()
+
+    # Telegram botni ishga tushirish
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
@@ -189,3 +209,4 @@ if __name__ == "__main__":
 
     print("Bot ishga tushdi...")
     app.run_polling()
+    
