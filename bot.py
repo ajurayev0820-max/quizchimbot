@@ -2,7 +2,6 @@ import csv
 import logging
 import os
 import random
-import re
 from threading import Thread
 import docx
 from flask import Flask
@@ -21,7 +20,7 @@ BOT_TOKEN = "8885503132:AAFyCJmyo0oLDLNiK0agg0URqc1rDuG7DHQ"
 
 logging.basicConfig(level=logging.INFO)
 
-# --- RENDER UCHUN FLASK SERVER ---
+# --- RENDER FLASK SERVER ---
 web_app = Flask("")
 
 
@@ -39,13 +38,20 @@ def run_web():
 
 
 def clean_row(row):
-    """Jadvaldagi bo'sh va keraksiz kataklarni tozalash hamda tartib raqamini ajratish"""
+    """Kataklarni tozalash va birinchi ustundagi tartib raqamini (№) olib tashlash"""
     cleaned = [str(cell).strip() for cell in row if cell is not None]
-    cleaned = [c for c in cleaned if c]
+    cleaned = [c for c in cleaned if c and c.lower() != "none"]
     if not cleaned:
         return []
 
-    # Agar 1-ustun tartib raqami bo'lsa (1, 2, №, T/r), olib tashlanadi
+    # Binar / iyeroglif belgilarni o'tkazib yuborish
+    if any(
+        bad_char in cleaned[0]
+        for bad_char in ["ÐÏà", "ÿÿÿ", "þÿ", "\x00", "\x01"]
+    ):
+        return []
+
+    # Agar 1-ustun tartib raqami bo'lsa (1, 2, №, T/r), olib tashlaymiz
     first_cell = (
         cleaned[0].lower().replace(".", "").replace(")", "").strip()
     )
@@ -58,66 +64,6 @@ def clean_row(row):
         cleaned = cleaned[1:]
 
     return cleaned
-
-
-def parse_doc_raw(file_path):
-    """Eski .doc fayllardan jadval va matnlarni ajratib olish (3 bosqichli)"""
-    rows = []
-
-    # 1-Urinish: python-docx (ayrim .doc kengaytmali fayllar aslida .docx bo'ladi)
-    try:
-        doc = docx.Document(file_path)
-        for table in doc.tables:
-            for row in table.rows:
-                row_vals = [cell.text for cell in row.cells]
-                r = clean_row(row_vals)
-                if len(r) >= 2:
-                    rows.append(r)
-        if rows:
-            return rows
-    except Exception:
-        pass
-
-    # 2-Urinish: pypandoc orqali o'girish
-    try:
-        import pypandoc
-
-        output = pypandoc.convert_file(
-            file_path, "plain", extra_args=["--wrap=none"]
-        )
-        for line in output.split("\n"):
-            line = line.strip()
-            if line:
-                parts = [p.strip() for p in line.split("\t") if p.strip()]
-                r = clean_row(parts)
-                if len(r) >= 2:
-                    rows.append(r)
-        if rows:
-            return rows
-    except Exception:
-        pass
-
-    # 3-Urinish: Binary Text Extraction (RTF / Raw String parsing)
-    try:
-        with open(file_path, "rb") as f:
-            content = f.read().decode("latin-1", errors="ignore")
-
-        # Matn ichidagi printable belgilarni va tab-spacinglarni qidirish
-        clean_text = re.sub(r"[^\x20-\x7E\xA0-\xFF\n\t]", " ", content)
-        lines = clean_text.split("\n")
-        for line in lines:
-            parts = [
-                p.strip()
-                for p in line.split("\t")
-                if len(p.strip()) > 1 and not p.startswith("\\")
-            ]
-            r = clean_row(parts)
-            if len(r) >= 2:
-                rows.append(r)
-    except Exception as e:
-        logging.error(f"Raw Doc Error: {e}")
-
-    return rows
 
 
 def read_file_data(file_path):
@@ -148,11 +94,12 @@ def read_file_data(file_path):
                 sheet.cell(row_idx, col_idx).value
                 for col_idx in range(sheet.ncols)
             ]
-            r = clean_row(row_vals)
+            r = clean_row(row_idx)
             if len(r) >= 2:
                 rows.append(r)
 
-    elif file_path.endswith(".docx"):
+    elif file_path.endswith(".docx") or file_path.endswith(".doc"):
+        # Word jadvallarini o'qish
         try:
             doc = docx.Document(file_path)
             for table in doc.tables:
@@ -162,10 +109,7 @@ def read_file_data(file_path):
                     if len(r) >= 2:
                         rows.append(r)
         except Exception as e:
-            logging.error(f"Docx Error: {e}")
-
-    elif file_path.endswith(".doc"):
-        rows = parse_doc_raw(file_path)
+            logging.error(f"Doc/Docx Read Error: {e}")
 
     return rows
 
@@ -179,7 +123,7 @@ def convert_data(rows):
         if not row or len(row) < 2:
             continue
 
-        # Sarlavha qatorlarini tashlab o'tish
+        # Sarlavhalarni tashlab o'tish
         header_check = row[0].lower()
         if (
             "savol" in header_check
@@ -194,7 +138,8 @@ def convert_data(rows):
             cell for cell in row[2:] if cell and cell.lower() != "none"
         ]
 
-        if not question or not correct_ans:
+        # Binar/xato belgilardan holi ekanligini tekshirish
+        if "ÿ" in question or "ÐÏ" in question or not correct_ans:
             continue
 
         # 1. QuizMaker
@@ -223,7 +168,7 @@ def convert_data(rows):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Xush kelibsiz! Menga testlar joylashgan Excel (.xlsx, .xls), CSV yoki Word (.docx, .doc) faylini yuboring."
+        "Xush kelibsiz! Menga testlar joylashgan Excel (.xlsx, .xls), CSV yoki Word (.docx) faylini yuboring."
     )
 
 
@@ -247,20 +192,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         rows = read_file_data(download_path)
 
-        if not rows:
-            await update.message.reply_text(
-                "Fayl bo'sh yoki jadval formati mos kelmadi.\n\n"
-                "💡 **Eslatma:** Agarda `.doc` fayli o'qilmassa, iltimos faylni telefoningizda ochib 'Save As' qilib `.docx` formatida saqlab qayta yuboring."
-            )
-            if os.path.exists(download_path):
-                os.remove(download_path)
-            return
-
-        quizmaker_txt, assyst_txt = convert_data(rows)
+        quizmaker_txt, assyst_txt = "", ""
+        if rows:
+            quizmaker_txt, assyst_txt = convert_data(rows)
 
         if not quizmaker_txt or not assyst_txt:
             await update.message.reply_text(
-                "Fayldan savollarni ajratib bo'lmadi."
+                "⚠️ **Faylni o'qishda xatolik!**\n\n"
+                "Ushbu fayl eski Word (.doc) formatida bo'lgani uchun binar kodi o'qildi.\n"
+                "Iltimos, faylingizni ochib **'Сохранить как' (Save As)** qilib **.docx** formatida saqlang va qayta yuboring!"
             )
             if os.path.exists(download_path):
                 os.remove(download_path)
