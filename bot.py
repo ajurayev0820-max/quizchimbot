@@ -21,7 +21,7 @@ BOT_TOKEN = "8885503132:AAFyCJmyo0oLDLNiK0agg0URqc1rDuG7DHQ"
 
 logging.basicConfig(level=logging.INFO)
 
-# --- RENDER FLASK SERVER ---
+# --- RENDER UCHUN FLASK SERVER ---
 web_app = Flask("")
 
 
@@ -39,13 +39,13 @@ def run_web():
 
 
 def clean_row(row):
-    """Jadvaldagi bo'sh va keraksiz kataklarni tozalash"""
+    """Jadvaldagi bo'sh va keraksiz kataklarni tozalash hamda tartib raqamini ajratish"""
     cleaned = [str(cell).strip() for cell in row if cell is not None]
     cleaned = [c for c in cleaned if c]
     if not cleaned:
         return []
 
-    # Agar 1-ustun tartib raqami bo'lsa (masalan: 1, 2, №, T/r), uni olib tashlaymiz
+    # Agar 1-ustun tartib raqami bo'lsa (1, 2, №, T/r), olib tashlanadi
     first_cell = (
         cleaned[0].lower().replace(".", "").replace(")", "").strip()
     )
@@ -60,27 +60,63 @@ def clean_row(row):
     return cleaned
 
 
-def parse_doc_file(file_path):
-    """Eski .doc fayllarni matn ko'rinishida o'qish"""
+def parse_doc_raw(file_path):
+    """Eski .doc fayllardan jadval va matnlarni ajratib olish (3 bosqichli)"""
     rows = []
+
+    # 1-Urinish: python-docx (ayrim .doc kengaytmali fayllar aslida .docx bo'ladi)
+    try:
+        doc = docx.Document(file_path)
+        for table in doc.tables:
+            for row in table.rows:
+                row_vals = [cell.text for cell in row.cells]
+                r = clean_row(row_vals)
+                if len(r) >= 2:
+                    rows.append(r)
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    # 2-Urinish: pypandoc orqali o'girish
     try:
         import pypandoc
 
         output = pypandoc.convert_file(
             file_path, "plain", extra_args=["--wrap=none"]
         )
-        lines = output.split("\n")
-        for line in lines:
+        for line in output.split("\n"):
             line = line.strip()
-            if not line:
-                continue
-            # Agarda tab orqali ajratilgan bo'lsa
-            parts = [p.strip() for p in line.split("\t") if p.strip()]
+            if line:
+                parts = [p.strip() for p in line.split("\t") if p.strip()]
+                r = clean_row(parts)
+                if len(r) >= 2:
+                    rows.append(r)
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    # 3-Urinish: Binary Text Extraction (RTF / Raw String parsing)
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read().decode("latin-1", errors="ignore")
+
+        # Matn ichidagi printable belgilarni va tab-spacinglarni qidirish
+        clean_text = re.sub(r"[^\x20-\x7E\xA0-\xFF\n\t]", " ", content)
+        lines = clean_text.split("\n")
+        for line in lines:
+            parts = [
+                p.strip()
+                for p in line.split("\t")
+                if len(p.strip()) > 1 and not p.startswith("\\")
+            ]
             r = clean_row(parts)
             if len(r) >= 2:
                 rows.append(r)
     except Exception as e:
-        logging.error(f"Doc read error: {e}")
+        logging.error(f"Raw Doc Error: {e}")
+
     return rows
 
 
@@ -126,21 +162,10 @@ def read_file_data(file_path):
                     if len(r) >= 2:
                         rows.append(r)
         except Exception as e:
-            logging.error(f"Docx error: {e}")
+            logging.error(f"Docx Error: {e}")
 
     elif file_path.endswith(".doc"):
-        # Birinchi navbatda python-docx orqali sinab ko'rish (.doc kengaytmali lekin aslida docx bo'lsa)
-        try:
-            doc = docx.Document(file_path)
-            for table in doc.tables:
-                for row in table.rows:
-                    row_vals = [cell.text for cell in row.cells]
-                    r = clean_row(row_vals)
-                    if len(r) >= 2:
-                        rows.append(r)
-        except Exception:
-            # Haqiqiy eski .doc bo'lsa
-            rows = parse_doc_file(file_path)
+        rows = parse_doc_raw(file_path)
 
     return rows
 
@@ -154,7 +179,7 @@ def convert_data(rows):
         if not row or len(row) < 2:
             continue
 
-        # Sarlavha qatorlarini o'tkazib yuborish
+        # Sarlavha qatorlarini tashlab o'tish
         header_check = row[0].lower()
         if (
             "savol" in header_check
@@ -224,7 +249,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not rows:
             await update.message.reply_text(
-                "Fayl bo'sh yoki jadval formati mos kelmadi."
+                "Fayl bo'sh yoki jadval formati mos kelmadi.\n\n"
+                "💡 **Eslatma:** Agarda `.doc` fayli o'qilmassa, iltimos faylni telefoningizda ochib 'Save As' qilib `.docx` formatida saqlab qayta yuboring."
             )
             if os.path.exists(download_path):
                 os.remove(download_path)
