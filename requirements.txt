@@ -4,3 +4,4 @@ xlrd
 python-docx
 flask
 pypandoc
+striprtf
