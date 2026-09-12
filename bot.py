@@ -20,7 +20,7 @@ BOT_TOKEN = "8885503132:AAFyCJmyo0oLDLNiK0agg0URqc1rDuG7DHQ"
 
 logging.basicConfig(level=logging.INFO)
 
-# --- RENDER UCHUN VEB-SERVER (PORT XATOSINI YO'QOTISH UCHUN) ---
+# --- RENDER UCHUN FLASK SERVER ---
 web_app = Flask("")
 
 
@@ -34,7 +34,25 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 
-# -------------------------------------------------------------
+# ---------------------------------
+
+
+def clean_row(row):
+    """Jadvaldagi bo'sh va keraksiz kataklarni tozalash"""
+    cleaned = [str(cell).strip() for cell in row if cell is not None]
+    if not cleaned:
+        return []
+
+    # Agar 1-ustun tartib raqami bo'lsa (masalan: 1, 2, №, T/r), uni olib tashlaymiz
+    first_cell = cleaned[0].lower().replace(".", "")
+    if (
+        first_cell.isdigit()
+        or first_cell in ["№", "nr", "t/r", "no"]
+        or "test" in first_cell
+    ):
+        cleaned = cleaned[1:]
+
+    return cleaned
 
 
 def read_file_data(file_path):
@@ -44,49 +62,43 @@ def read_file_data(file_path):
         with open(file_path, mode="r", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             for row in reader:
-                if row:
-                    rows.append([str(cell).strip() for cell in row])
+                r = clean_row(row)
+                if len(r) >= 2:
+                    rows.append(r)
 
     elif file_path.endswith(".xlsx"):
         wb = openpyxl.load_workbook(file_path, data_only=False)
         sheet = wb.active
         for row in sheet.iter_rows():
-            row_vals = [
-                str(cell.value).strip() if cell.value is not None else ""
-                for cell in row
-            ]
-            if any(row_vals):
-                rows.append(row_vals)
+            row_vals = [cell.value for cell in row]
+            r = clean_row(row_vals)
+            if len(r) >= 2:
+                rows.append(r)
 
     elif file_path.endswith(".xls"):
         wb = xlrd.open_workbook(file_path, formatting_info=True)
         sheet = wb.sheet_by_index(0)
         for row_idx in range(sheet.nrows):
-            row_vals = []
-            for col_idx in range(sheet.ncols):
-                cell = sheet.cell(row_idx, col_idx)
-                if cell.ctype == xlrd.XL_CELL_NUMBER:
-                    xf = wb.xf_list[cell.xf_index]
-                    fmt = wb.format_map.get(xf.format_key)
-                    if fmt and "%" in fmt.format_str:
-                        val = f"{int(round(cell.value * 100))}%"
-                    elif cell.value.is_integer():
-                        val = str(int(cell.value))
-                    else:
-                        val = str(cell.value)
-                else:
-                    val = str(cell.value).strip()
-                row_vals.append(val)
-            if any(row_vals):
-                rows.append(row_vals)
+            row_vals = [
+                sheet.cell(row_idx, col_idx).value
+                for col_idx in range(sheet.ncols)
+            ]
+            r = clean_row(row_vals)
+            if len(r) >= 2:
+                rows.append(r)
 
-    elif file_path.endswith(".docx"):
-        doc = docx.Document(file_path)
-        for table in doc.tables:
-            for row in table.rows:
-                row_vals = [cell.text.strip() for cell in row.cells]
-                if any(row_vals):
-                    rows.append(row_vals)
+    elif file_path.endswith(".docx") or file_path.endswith(".doc"):
+        # docx kutubxonasi orqali jadvallarni o'qish
+        try:
+            doc = docx.Document(file_path)
+            for table in doc.tables:
+                for row in table.rows:
+                    row_vals = [cell.text for cell in row.cells]
+                    r = clean_row(row_vals)
+                    if len(r) >= 2:
+                        rows.append(r)
+        except Exception:
+            pass
 
     return rows
 
@@ -97,7 +109,8 @@ def convert_data(rows):
     valid_q_num = 1
 
     for row in rows:
-        if len(row) < 2:
+        # Sarlavha qatorlarini (masalan: Savol, To'g'ri javob) o'tkazib yuborish
+        if "savol" in row[0].lower() or "topshiriq" in row[0].lower():
             continue
 
         question = row[0]
@@ -109,6 +122,7 @@ def convert_data(rows):
         if not question or not correct_ans:
             continue
 
+        # 1. QuizMaker
         all_options = [correct_ans] + wrong_answers
         random.shuffle(all_options)
         correct_option_number = all_options.index(correct_ans) + 1
@@ -120,6 +134,7 @@ def convert_data(rows):
             quizmaker_text += f"{label}. {opt}\n"
         quizmaker_text += f"{correct_option_number}\n\n"
 
+        # 2. Assyst
         assyst_text += f"? {question}\n"
         assyst_text += f"+ {correct_ans}\n"
         for w_ans in wrong_answers:
@@ -133,7 +148,7 @@ def convert_data(rows):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Xush kelibsiz! Menga testlar joylashgan Excel (.xlsx, .xls), CSV yoki Word (.docx) faylini yuboring."
+        "Xush kelibsiz! Menga testlar joylashgan Excel (.xlsx, .xls), CSV yoki Word (.docx, .doc) faylini yuboring."
     )
 
 
@@ -142,9 +157,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = doc.file_name
     ext = os.path.splitext(file_name)[1].lower()
 
-    if ext not in [".xlsx", ".xls", ".csv", ".docx"]:
+    if ext not in [".xlsx", ".xls", ".csv", ".docx", ".doc"]:
         await update.message.reply_text(
-            "Faqat .xlsx, .xls, .csv yoki .docx formatidagi fayllarni yuboring!"
+            "Faqat .xlsx, .xls, .csv, .docx yoki .doc formatidagi fayllarni yuboring!"
         )
         return
 
@@ -159,7 +174,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not rows:
             await update.message.reply_text(
-                "Fayl bo'sh yoki unda jadval topilmadi."
+                "Fayl bo'sh yoki jadval formati mos kelmadi."
             )
             os.remove(download_path)
             return
@@ -197,10 +212,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == "__main__":
-    # Veb serverni fonda ishga tushirish (Render talabi bo'yicha)
     Thread(target=run_web).start()
 
-    # Telegram botni ishga tushirish
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
