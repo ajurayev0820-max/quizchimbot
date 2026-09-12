@@ -2,6 +2,7 @@ import csv
 import logging
 import os
 import random
+import re
 from threading import Thread
 import docx
 from flask import Flask
@@ -20,7 +21,7 @@ BOT_TOKEN = "8885503132:AAFyCJmyo0oLDLNiK0agg0URqc1rDuG7DHQ"
 
 logging.basicConfig(level=logging.INFO)
 
-# --- RENDER UCHUN FLASK SERVER ---
+# --- RENDER FLASK SERVER ---
 web_app = Flask("")
 
 
@@ -34,25 +35,53 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 
-# ---------------------------------
+# ---------------------------
 
 
 def clean_row(row):
     """Jadvaldagi bo'sh va keraksiz kataklarni tozalash"""
     cleaned = [str(cell).strip() for cell in row if cell is not None]
+    cleaned = [c for c in cleaned if c]
     if not cleaned:
         return []
 
     # Agar 1-ustun tartib raqami bo'lsa (masalan: 1, 2, №, T/r), uni olib tashlaymiz
-    first_cell = cleaned[0].lower().replace(".", "")
+    first_cell = (
+        cleaned[0].lower().replace(".", "").replace(")", "").strip()
+    )
     if (
         first_cell.isdigit()
-        or first_cell in ["№", "nr", "t/r", "no"]
+        or first_cell in ["№", "nr", "t/r", "no", "n"]
         or "test" in first_cell
+        or "topshiriq" in first_cell
     ):
         cleaned = cleaned[1:]
 
     return cleaned
+
+
+def parse_doc_file(file_path):
+    """Eski .doc fayllarni matn ko'rinishida o'qish"""
+    rows = []
+    try:
+        import pypandoc
+
+        output = pypandoc.convert_file(
+            file_path, "plain", extra_args=["--wrap=none"]
+        )
+        lines = output.split("\n")
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Agarda tab orqali ajratilgan bo'lsa
+            parts = [p.strip() for p in line.split("\t") if p.strip()]
+            r = clean_row(parts)
+            if len(r) >= 2:
+                rows.append(r)
+    except Exception as e:
+        logging.error(f"Doc read error: {e}")
+    return rows
 
 
 def read_file_data(file_path):
@@ -87,8 +116,20 @@ def read_file_data(file_path):
             if len(r) >= 2:
                 rows.append(r)
 
-    elif file_path.endswith(".docx") or file_path.endswith(".doc"):
-        # docx kutubxonasi orqali jadvallarni o'qish
+    elif file_path.endswith(".docx"):
+        try:
+            doc = docx.Document(file_path)
+            for table in doc.tables:
+                for row in table.rows:
+                    row_vals = [cell.text for cell in row.cells]
+                    r = clean_row(row_vals)
+                    if len(r) >= 2:
+                        rows.append(r)
+        except Exception as e:
+            logging.error(f"Docx error: {e}")
+
+    elif file_path.endswith(".doc"):
+        # Birinchi navbatda python-docx orqali sinab ko'rish (.doc kengaytmali lekin aslida docx bo'lsa)
         try:
             doc = docx.Document(file_path)
             for table in doc.tables:
@@ -98,7 +139,8 @@ def read_file_data(file_path):
                     if len(r) >= 2:
                         rows.append(r)
         except Exception:
-            pass
+            # Haqiqiy eski .doc bo'lsa
+            rows = parse_doc_file(file_path)
 
     return rows
 
@@ -109,8 +151,16 @@ def convert_data(rows):
     valid_q_num = 1
 
     for row in rows:
-        # Sarlavha qatorlarini (masalan: Savol, To'g'ri javob) o'tkazib yuborish
-        if "savol" in row[0].lower() or "topshiriq" in row[0].lower():
+        if not row or len(row) < 2:
+            continue
+
+        # Sarlavha qatorlarini o'tkazib yuborish
+        header_check = row[0].lower()
+        if (
+            "savol" in header_check
+            or "topshiriq" in header_check
+            or "javob" in header_check
+        ):
             continue
 
         question = row[0]
@@ -176,10 +226,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "Fayl bo'sh yoki jadval formati mos kelmadi."
             )
-            os.remove(download_path)
+            if os.path.exists(download_path):
+                os.remove(download_path)
             return
 
         quizmaker_txt, assyst_txt = convert_data(rows)
+
+        if not quizmaker_txt or not assyst_txt:
+            await update.message.reply_text(
+                "Fayldan savollarni ajratib bo'lmadi."
+            )
+            if os.path.exists(download_path):
+                os.remove(download_path)
+            return
 
         base_name = os.path.splitext(file_name)[0]
         qm_path = f"{base_name}_QuizMaker.txt"
